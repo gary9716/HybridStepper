@@ -308,6 +308,31 @@
 /// Gregor Christandl reports that with an Arduino Due and a simple test program, 
 /// he measured 43163 steps per second using runSpeed(), 
 /// and 16214 steps per second using run();
+
+#ifndef LARGE_N
+#define LARGE_N (1000000000)
+#endif
+
+#ifndef LARGE_CN_DIV
+#define LARGE_CN_DIV (1000000.0)
+#endif
+
+#ifndef maxMaxSpeed
+#define maxMaxSpeed (64000.0)
+#endif
+
+#ifndef minMaxSpeed
+// steps/sec min 1 i.e. 5e-3 rev/sec at 200 step per rev
+// i.e. 200sec/rev, 3.3min/rev
+// min speed must be > 0.0003
+// minSpeed sets how slow you can set the target speed
+// if setSpeed called with a target speed of less than this(e.g. 0) AND current speed is < 2*minSpeed
+// then motor stops
+#define minMaxSpeed (0.0003)
+#endif
+
+#define SQRT_MAGIC_F 0x5f3759df 
+   
 class AccelStepper
 {
 public:
@@ -414,6 +439,7 @@ public:
     /// root to be calculated. Dont call more ofthen than needed
     void    setAcceleration(float acceleration);
 
+    /// Run at constant speed
     /// Sets the desired constant speed for use with runSpeed().
     /// \param[in] speed The desired constant speed in steps per
     /// second. Positive is clockwise. Speeds of more than 1000 steps per
@@ -465,7 +491,7 @@ public:
     /// to the new target position and blocks until it is at
     /// position. Dont use this in event loops, since it blocks.
     /// \param[in] position The new target position.
-    void    runToNewPosition(long position);
+    void runToNewPosition(long position);
 
     /// Sets a new target position that causes the stepper
     /// to stop as quickly as possible, using the current speed and acceleration parameters.
@@ -489,7 +515,7 @@ public:
     /// approximately 20 microseconds. Times less than 20 microseconds
     /// will usually result in 20 microseconds or so.
     /// \param[in] minWidth The minimum pulse width in microseconds. 
-    void    setMinPulseWidth(unsigned int minWidth);
+    void    setMinPulseWidth(uint16_t minWidth);
 
     /// Sets the enable pin number for stepper drivers.
     /// 0xFF indicates unused (default).
@@ -518,29 +544,37 @@ public:
     /// \return true if the speed is not zero or not at the target position
     bool    isRunning();
 
-    void setInfiniteMode(bool enable);
+    /**
+       isDirForward()
+       returns true if direction is FORWARD
+    */
+    inline boolean isDirForward();
 
-    /// Forces the library to compute a new instantaneous speed and set that as
-    /// the current speed. It is called by
-    /// the library:
-    /// \li  after each step
-    /// \li  after change to maxSpeed through setMaxSpeed()
-    /// \li  after change to acceleration through setAcceleration()
-    /// \li  after change to target position (relative or absolute) through
-    /// move() or moveTo()
-    void computeNewSpeed();
-    void slowDownToStopInInfiniteMode(bool enable);
+    typedef enum
+    {
+        Infinite = 0,
+        Position = 1
+    } AccelStepperMode;
+    
+    void    hardStop();
+    void    setMinSpeed(float speed);
+    float   minSpeed();
+    void    setTargetSpeed(float speed);
+    float   getTargetSpeed();
+    void    setInfModeMaxPosLimit(int32_t mPos);
+    int32_t getInfModeMaxPosLimit();
+    void    setInfModeMinPosLimit(int32_t mPos);
+    int32_t getInfModeMinPosLimit();
+    
 protected:
 
     /// \brief Direction indicator
     /// Symbolic names for the direction the motor is turning
     typedef enum
     {
-	DIRECTION_CCW = 0,  ///< Counter-Clockwise
+	    DIRECTION_CCW = 0,  ///< Counter-Clockwise
         DIRECTION_CW  = 1   ///< Clockwise
     } Direction;
-
-    
 
     /// Low level function to set the motor output pins
     /// bit 0 of the mask corresponds to _pin[0]
@@ -602,54 +636,77 @@ protected:
     /// pin3, pin4.
     /// \param[in] step The current step phase number (0 to 7)
     virtual void   step8(long step);
+    
+    /// Forces the library to compute a new instantaneous speed and set that as
+    /// the current speed. It is called by
+    /// the library:
+    /// \li  after each step
+    /// \li  after change to maxSpeed through setMaxSpeed()
+    /// \li  after change to acceleration through setAcceleration()
+    /// \li  after change to target position (relative or absolute) through
+    /// move() or moveTo()
+    void computeNewSpeed();
 
     /// Current direction motor is spinning in
     /// Protected because some peoples subclasses need it to be so
     boolean _direction; // 1 == CW
     
+    /**
+       setDir(bool)
+       Default is HIGH for forward
+    */
+    void setDir(boolean flag);
+
+    void internalSetSpeed(float sp);
+
+    // a little less than max int32_t
+    // allow for times 2 for distanceToGo to still fit in int32_t
+    const static int32_t MAX_INT32_T  = 0x3ffffff0;
+    const uint8_t defaultForwardDir = DIRECTION_CW;
+
 private:
-    bool _slowDownMode;
-    bool _infiniteMode;
+
+
     /// Number of pins on the stepper motor. Permits 2 or 4. 2 pins is a
     /// bipolar, and 4 pins is a unipolar.
-    uint8_t        _interface;          // 0, 1, 2, 4, 8, See MotorInterfaceType
+    uint8_t _interface;          // 0, 1, 2, 4, 8, See MotorInterfaceType
 
     /// Arduino pin number assignments for the 2 or 4 pins required to interface to the
     /// stepper motor or driver
-    uint8_t        _pin[4];
+    uint8_t _pin[4];
 
     /// Whether the _pins is inverted or not
-    uint8_t        _pinInverted[4];
+    uint8_t _pinInverted[4];
 
     /// The current absolution position in steps.
-    long           _currentPos;    // Steps
+    int32_t _currentPos;    // Steps
 
     /// The target position in steps. The AccelStepper library will move the
     /// motor from the _currentPos to the _targetPos, taking into account the
     /// max speed, acceleration and deceleration
-    long           _targetPos;     // Steps
+    int32_t _targetPos;     // Steps
 
     /// The current motos speed in steps per second
     /// Positive is clockwise
-    float          _speed;         // Steps per second
+    float _speed;         // Steps per second
 
     /// The maximum permitted speed in steps per second. Must be > 0.
-    float          _maxSpeed;
+    float _maxSpeed;
 
     /// The acceleration to use to accelerate or decelerate the motor in steps
     /// per second per second. Must be > 0
-    float          _acceleration;
-    float          _sqrt_twoa; // Precomputed sqrt(2*_acceleration)
+    float _acceleration;
+    float _sqrt_twoa; // Precomputed sqrt(2*_acceleration)
 
     /// The current interval between steps in microseconds.
     /// 0 means the motor is currently stopped with _speed == 0
-    unsigned long  _stepInterval;
+    uint32_t _stepInterval;
 
     /// The last step time in microseconds
-    unsigned long  _lastStepTime;
+    uint32_t _lastStepTime;
 
     /// The minimum allowed pulse width in microseconds
-    unsigned int   _minPulseWidth;
+    uint16_t _minPulseWidth;
 
     /// Is the direction pin inverted?
     ///bool           _dirInverted; /// Moved to _pinInverted[1]
@@ -658,10 +715,10 @@ private:
     ///bool           _stepInverted; /// Moved to _pinInverted[0]
 
     /// Is the enable pin inverted?
-    bool           _enableInverted;
+    bool _enableInverted;
 
     /// Enable pin for stepper driver, or 0xFF if unused.
-    uint8_t        _enablePin;
+    uint8_t _enablePin;
 
     /// The pointer to a forward-step procedure
     void (*_forward)();
@@ -670,7 +727,7 @@ private:
     void (*_backward)();
 
     /// The step counter for speed calculations
-    long _n;
+    int32_t _n;
 
     /// Initial step size in microseconds
     float _c0;
@@ -681,6 +738,19 @@ private:
     /// Min step size in microseconds based on maxSpeed
     float _cmin; // at max speed
 
+    //from SpeedStepper
+    float _cmax; // at min speed
+    float _a_speed;
+    float _targetSpeed;
+    float _a_targetSpeed;
+    boolean _targetDir;
+    float _final_cn; // cn at targetSpeed
+    //boolean goingHome; // set to true when returning to home, 0 position
+    float _minSpeed;
+    int32_t maxPositionLimit;
+    int32_t minPositionLimit;
+
+    uint8_t _curMode;
 };
 
 /// @example Random.pde

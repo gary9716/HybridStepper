@@ -35,6 +35,15 @@ setMinPulseWidth	KEYWORD2
 setEnablePin	KEYWORD2
 setPinsInverted	KEYWORD2
 maxSpeed	KEYWORD2
+setTargetSpeed KEYWORD2
+getTargetSpeed KEYWORD2
+hardStop KEYWORD2
+setMinSpeed KEYWORD2
+minSpeed KEYWORD2
+setInfModeMaxPosLimit KEYWORD2
+getInfModeMaxPosLimit KEYWORD2
+setInfModeMinPosLimit KEYWORD2
+getInfModeMinPosLimit KEYWORD2
 #######################################
 # Constants (LITERAL1)
 #######################################

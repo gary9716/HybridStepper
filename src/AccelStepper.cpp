@@ -20,13 +20,27 @@ void dump(uint8_t* p, int l)
 }
 #endif
 
+//amazing Quake invented algorithm
+float sqrt2(const float x)
+{
+  const float xhalf = 0.5f*x;
+  union // get bits for floating value
+  {
+    float x;
+    int i;
+  } u;
+  u.x = x;
+  u.i = SQRT_MAGIC_F - (u.i >> 1);  // gives initial guess y0
+  return x*u.x*(1.5f - xhalf*u.x*u.x);// Newton step, repeating increases accuracy 
+}
+
 void AccelStepper::moveTo(long absolute)
 {
+    _curMode = Position;
     if (_targetPos != absolute)
     {
         _targetPos = absolute;
         computeNewSpeed();
-        // compute new n?
     }
 }
 
@@ -41,52 +55,85 @@ void AccelStepper::move(long relative)
 boolean AccelStepper::runSpeed()
 {
     // Dont do anything unless we actually have a step interval
-    if (!_stepInterval)
-	return false;
+    if (_stepInterval == 0)
+	    return false;
 
     unsigned long time = micros();   
     if (time - _lastStepTime >= _stepInterval)
     {
-	if (_direction == DIRECTION_CW)
-	{
-	    // Clockwise
-	    _currentPos += 1;
-	}
-	else
-	{
-	    // Anticlockwise  
-	    _currentPos -= 1;
-	}
-	step(_currentPos);
+        if (isDirForward())
+        {
+            // Clockwise
+            if(_currentPos <  MAX_INT32_T)
+                _currentPos += 1;
+        }
+        else
+        {
+            // Anticlockwise 
+            if(_currentPos > -MAX_INT32_T) 
+                _currentPos -= 1;
+        }
+        step(_currentPos);
 
-	_lastStepTime = time; // Caution: does not account for costs in step()
+        _lastStepTime = time; // Caution: does not account for costs in step()
 
-	return true;
+	    return true;
     }
     else
     {
-	return false;
+	    return false;
     }
 }
 
-long AccelStepper::distanceToGo()
+int32_t AccelStepper::distanceToGo()
 {
-    return _targetPos - _currentPos;
+    if(_curMode == Position)
+        return _targetPos - _currentPos;
+    else //Infinite
+    {
+        int32_t dist = 0;
+        bool increasing = isDirForward();
+        if (!isRunning()) {
+            increasing = _targetDir;
+        }
+        if (increasing) {
+            dist = (maxPositionLimit - _currentPos);
+        } else {
+            dist = (_currentPos - minPositionLimit);
+        }
+        return dist;
+    }
 }
 
-long AccelStepper::targetPosition()
+int32_t AccelStepper::targetPosition()
 {
     return _targetPos;
 }
 
-long AccelStepper::currentPosition()
+int32_t AccelStepper::currentPosition()
 {
     return _currentPos;
 }
 
+inline boolean AccelStepper::isDirForward() {
+  return _direction == defaultForwardDir;
+}
+
+void AccelStepper::hardStop() {
+  _stepInterval = 0; // stop;
+  _speed = 0.0;
+  _a_speed = 0.0;
+  _targetSpeed = 0.0;
+  _a_targetSpeed = 0.0;
+  _final_cn = LARGE_N; // very big
+  setDir(true); // sets forward
+  _n = 0;
+  _cn = _c0;
+}
+
 // Useful during initialisations or after initial positioning
 // Sets speed to 0
-void AccelStepper::setCurrentPosition(long position)
+void AccelStepper::setCurrentPosition(int32_t position)
 {
     _targetPos = _currentPos = position;
     _n = 0;
@@ -94,25 +141,202 @@ void AccelStepper::setCurrentPosition(long position)
     _speed = 0.0;
 }
 
-void AccelStepper::setInfiniteMode(bool enable) {
-    _infiniteMode = enable;
+void AccelStepper::setInfModeMaxPosLimit(int32_t mPos) {
+    if (mPos > MAX_INT32_T) {
+        mPos = MAX_INT32_T;
+    }
+    if (mPos < _currentPos) {
+        mPos = _currentPos;
+    }
+    if (mPos < 0) {
+        mPos = 0;
+    }
+    maxPositionLimit = mPos;
 }
 
-void AccelStepper::slowDownToStopInInfiniteMode(bool enable) {
-    _slowDownMode = enable;
+int32_t AccelStepper::getInfModeMaxPosLimit() {
+    return maxPositionLimit;
+}
+
+void AccelStepper::setInfModeMinPosLimit(int32_t mPos) {
+    if (mPos < -MAX_INT32_T) {
+        mPos = -MAX_INT32_T;
+    }
+    if (mPos > _currentPos) {
+        mPos = _currentPos;
+    }
+    if (mPos > 0) {
+        mPos = 0;
+    }
+    minPositionLimit = mPos;
+}
+
+int32_t AccelStepper::getInfModeMinPosLimit() {
+    return minPositionLimit;
+}
+
+void AccelStepper::setTargetSpeed(float speed) {
+    if(speed == _targetSpeed) return;
+    _curMode = Infinite;
+    internalSetSpeed(speed); //call computeNewSpeed at last
+}
+
+float AccelStepper::getTargetSpeed() {
+    return _targetSpeed;
+}
+
+//sp is targetSpeed
+//call computeNewSpeed at last
+void AccelStepper::internalSetSpeed(float sp) {
+  if(_curMode == Infinite) {
+        //sp -> target speed -> new final_cn(final target cn) -> computeNewSpeed
+        float a_sp = fabs(sp);
+        if (a_sp > _maxSpeed) {
+            a_sp = _maxSpeed;
+        }
+
+        // limits targetSpeed and sets final_cn === targetSpeed
+        _targetSpeed = (sp >= 0) ? a_sp : -a_sp;
+        _a_targetSpeed = a_sp;
+
+        if (_a_targetSpeed < _minSpeed) {
+            _a_targetSpeed = 0.0;
+            _final_cn = LARGE_N; // very big
+        } else {
+            _final_cn = LARGE_CN_DIV / _a_targetSpeed;
+        }
+        _targetDir = _targetSpeed >= 0;  // the final direction we want to go in
+
+        int32_t stepsToStop = ((int32_t)((_speed * _speed) / (2.0 * _acceleration))); // Equation 16
+        
+        // can be zero, will be zero if stopped
+        _n = stepsToStop; // new n for acceleration
+
+        // find the step sign to change speed
+        if (_targetDir == isDirForward()) { // same direction
+            setDir(_targetDir); // always
+            if (_a_targetSpeed > _a_speed) {
+                // n +ve
+            } 
+            else {
+                _n = -_n; // decelerate
+            }
+        } 
+        else {
+            // change in direction
+            // need to decelerate to 0 first
+            _n = -_n;
+            if (_n == 0) { // stopped or just about to
+                // change dir to target direction
+                setDir(_targetDir);
+            } 
+            else {
+                setDir(isDirForward()); // this should be the current setting
+            }
+        }
+        
+  }
+  
+  computeNewSpeed();
 }
 
 void AccelStepper::computeNewSpeed()
 {
-    long distanceTo = distanceToGo(); // +ve is clockwise from curent location
-    long stepsToStop = (long)((_speed * _speed) / (2.0 * _acceleration)); // Equation 16
-    if(!_infiniteMode) {
+    int32_t distanceTo = distanceToGo(); // +ve is clockwise from curent location
+    int32_t stepsToStop = (int32_t)((_speed * _speed) / (2.0 * _acceleration)); // Equation 16
+    
+    if(_curMode == Infinite) {
+        //distanceTo will always be positive in inf mode
+        if (distanceTo == 0) {
+            // hit the limit
+            hardStop();
+            return;
+        }
+        
+        bool approachingLimit = false;
+        // else moving in other direction
+        if (stepsToStop >= distanceTo) {
+            // need to slow down
+            _n = -distanceTo; // may be zero
+            approachingLimit = true;
+        }
+
+        if(_n == 0) {
+            if(_a_targetSpeed < _minSpeed) {
+                hardStop();
+                return;
+            }
+
+            // else do first step
+            _cn = _c0;
+            setDir(_targetDir); // was at n==0 so change dir now
+            if (_cn > _final_cn) { // i.e. first step slower then final
+                // first step of acceleration
+                // increment for next call n goes from 0 to 1
+                // next call will reduce cn and increase speed towards final
+                _n++; 
+            } 
+            else { // (final_cn > cn)
+                // go straight to target speed as less the first acceleration step
+                _cn = _final_cn; //maintain at target speed
+                _n = LARGE_N; // this suppresses further changes
+            }
+
+            // set stepInterval and speed
+            uint32_t laststepInterval = _stepInterval;
+            _stepInterval = _cn;
+            _a_speed = LARGE_CN_DIV / _cn;
+            if (isDirForward()) {
+                _speed = _a_speed;
+            } else {
+                _speed = -_a_speed;
+            }
+
+            if (laststepInterval == 0) {
+                // was stopped so do one step NOW
+                runSpeed();
+            }
+            return;
+        }
+        else {
+            //_n != 0
+            if (_n == LARGE_N) {
+                // have reached final speed just keep going
+                return;
+            }
+            
+            // else need to adjust speed
+            float deltaCn = - ((2.0 * _cn) / ((4.0 * _n) + 1));
+            float final_deltaCn = _final_cn - _cn;
+            float a_deltaCn = (deltaCn >= 0) ? deltaCn : -deltaCn;
+            float a_final_deltaCn = (final_deltaCn >= 0) ? final_deltaCn : -final_deltaCn;
+            
+            if ((!approachingLimit) && (isDirForward() == _targetDir) && (a_final_deltaCn < a_deltaCn)) {
+                _cn = _final_cn;
+                _n = LARGE_N;
+            } 
+            else {
+                _cn = _cn + deltaCn; // Equation 13
+                if (_n < MAX_INT32_T) {
+                    _n++; // for next loop
+                }
+            }
+            _stepInterval = _cn;
+            _a_speed = LARGE_CN_DIV / _cn;
+
+            if (isDirForward()) {
+                _speed = _a_speed;
+            } 
+            else {
+                _speed = -_a_speed;
+            }
+        }
+    }
+    else { //position
         if (distanceTo == 0 && stepsToStop <= 1)
         {
             // We are at the target and its time to stop
-            _stepInterval = 0;
-            _speed = 0.0;
-            _n = 0;
+            hardStop();
             return;
         }
 
@@ -123,14 +347,14 @@ void AccelStepper::computeNewSpeed()
             if (_n > 0)
             {
                 // Currently accelerating, need to decel now? Or maybe going the wrong way?
-                if ((stepsToStop >= distanceTo) || _direction == DIRECTION_CCW)
-                _n = -stepsToStop; // Start deceleration
+                if ((stepsToStop >= distanceTo) || !isDirForward())
+                    _n = -stepsToStop; // Start deceleration
             }
             else if (_n < 0)
             {
                 // Currently decelerating, need to accel again?
-                if ((stepsToStop < distanceTo) && _direction == DIRECTION_CW)
-                _n = -_n; // Start accceleration
+                if ((stepsToStop < distanceTo) && isDirForward())
+                    _n = -_n; // Start accceleration
             }
         }
         else if (distanceTo < 0)
@@ -140,49 +364,36 @@ void AccelStepper::computeNewSpeed()
             if (_n > 0)
             {
                 // Currently accelerating, need to decel now? Or maybe going the wrong way?
-                if ((stepsToStop >= -distanceTo) || _direction == DIRECTION_CW)
-                _n = -stepsToStop; // Start deceleration
+                if ((stepsToStop >= -distanceTo) || isDirForward())
+                    _n = -stepsToStop; // Start deceleration
             }
             else if (_n < 0)
             {
                 // Currently decelerating, need to accel again?
-                if ((stepsToStop < -distanceTo) && _direction == DIRECTION_CCW)
-                _n = -_n; // Start accceleration
+                if ((stepsToStop < -distanceTo) && !isDirForward())
+                    _n = -_n; // Start accceleration
             }
         }
-    }
-    else if(_slowDownMode) {
-        if(stepsToStop <= 1) {
-             // We are at the target and its time to stop
-            _stepInterval = 0;
-            _speed = 0.0;
-            _n = 0;
-            return;
+
+        // Need to accelerate or decelerate
+        if (_n == 0)
+        {
+            // First step from stopped
+            _cn = _c0;
+            setDir(distanceTo > 0);
         }
-        else {
-            _n = -stepsToStop;
+        else
+        {
+            // Subsequent step. Works for accel (n is +_ve) and decel (n is -ve).
+            _cn = _cn - ((2.0 * _cn) / ((4.0 * _n) + 1)); // Equation 13
+            _cn = max(_cn, _cmin); 
         }
+        _n++;
+        _stepInterval = _cn;
+        _speed = LARGE_CN_DIV / _cn;
+        if (!isDirForward()) _speed = -_speed;
     }
     
-    // Need to accelerate or decelerate
-    if (_n == 0)
-    {
-        // First step from stopped
-        _cn = _c0;
-        _direction = (distanceTo > 0) ? DIRECTION_CW : DIRECTION_CCW;
-    }
-    else
-    {
-        // Subsequent step. Works for accel (n is +_ve) and decel (n is -ve).
-        _cn = _cn - ((2.0 * _cn) / ((4.0 * _n) + 1)); // Equation 13
-        _cn = max(_cn, _cmin); 
-    }
-    _n++;
-    _stepInterval = _cn;
-    _speed = 1000000.0 / _cn;
-    if (_direction == DIRECTION_CCW)
-	    _speed = -_speed;
-
 #if 0
     Serial.println(_speed);
     Serial.println(_acceleration);
@@ -203,7 +414,7 @@ void AccelStepper::computeNewSpeed()
 boolean AccelStepper::run()
 {
     if (runSpeed())
-	computeNewSpeed();
+	    computeNewSpeed();
     return _speed != 0.0 || distanceToGo() != 0;
 }
 
@@ -225,8 +436,6 @@ AccelStepper::AccelStepper(uint8_t interface, uint8_t pin1, uint8_t pin2, uint8_
     _pin[2] = pin3;
     _pin[3] = pin4;
     _enableInverted = false;
-    _infiniteMode = false;
-    _slowDownMode = false;
     // NEW
     _n = 0;
     _c0 = 0.0;
@@ -234,6 +443,12 @@ AccelStepper::AccelStepper(uint8_t interface, uint8_t pin1, uint8_t pin2, uint8_
     _cmin = 1.0;
     _direction = DIRECTION_CCW;
 
+    maxPositionLimit = MAX_INT32_T;
+    minPositionLimit = -MAX_INT32_T;
+    hardStop();
+    setMaxSpeed(maxMaxSpeed); // sets cmax,cmin
+    setMinSpeed(minMaxSpeed);
+    
     int i;
     for (i = 0; i < 4; i++)
 	_pinInverted[i] = 0;
@@ -262,8 +477,7 @@ AccelStepper::AccelStepper(void (*forward)(), void (*backward)())
     _pin[3] = 0;
     _forward = forward;
     _backward = backward;
-    _infiniteMode = false;
-    _slowDownMode = false;
+
     // NEW
     _n = 0;
     _c0 = 0.0;
@@ -271,6 +485,12 @@ AccelStepper::AccelStepper(void (*forward)(), void (*backward)())
     _cmin = 1.0;
     _direction = DIRECTION_CCW;
 
+    maxPositionLimit = MAX_INT32_T;
+    minPositionLimit = -MAX_INT32_T;
+    hardStop();
+    setMaxSpeed(maxMaxSpeed); // sets cmax,cmin
+    setMinSpeed(minMaxSpeed);
+    
     int i;
     for (i = 0; i < 4; i++)
 	_pinInverted[i] = 0;
@@ -280,19 +500,41 @@ AccelStepper::AccelStepper(void (*forward)(), void (*backward)())
 
 void AccelStepper::setMaxSpeed(float speed)
 {
-    if (speed < 0.0)
-       speed = -speed;
-    if (_maxSpeed != speed)
-    {
-        _maxSpeed = speed;
-        _cmin = 1000000.0 / speed;
-        // Recompute _n from current speed and adjust speed if accelerating or cruising
-        if (_n > 0)
-        {
-            _n = (long)((_speed * _speed) / (2.0 * _acceleration)); // Equation 16
-            computeNewSpeed();
-        }
+    if (speed < 0.0) speed = -speed;
+    if (speed < minMaxSpeed) speed = minMaxSpeed;
+    if (speed > maxMaxSpeed) speed = maxMaxSpeed;
+    _maxSpeed = speed;
+    if(_minSpeed > _maxSpeed) {
+        //swap
+        float temp = _minSpeed;
+        _minSpeed = _maxSpeed;
+        _maxSpeed = temp;
     }
+
+    _cmax = LARGE_CN_DIV / _minSpeed;
+    _cmin = LARGE_CN_DIV / _maxSpeed;
+}
+
+void AccelStepper::setMinSpeed(float speed)
+{
+    if (speed < 0.0) speed = -speed;
+    if (speed < minMaxSpeed) speed = minMaxSpeed;
+    if (speed > maxMaxSpeed) speed = maxMaxSpeed;
+    _minSpeed = speed;
+    if(_minSpeed > _maxSpeed) {
+        //swap
+        float temp = _minSpeed;
+        _minSpeed = _maxSpeed;
+        _maxSpeed = temp;
+    }
+
+    _cmax = LARGE_CN_DIV / _minSpeed;
+    _cmin = LARGE_CN_DIV / _maxSpeed;
+}
+
+float AccelStepper::minSpeed()
+{
+    return _minSpeed;
 }
 
 float AccelStepper::maxSpeed()
@@ -300,21 +542,24 @@ float AccelStepper::maxSpeed()
     return _maxSpeed;
 }
 
-void AccelStepper::setAcceleration(float acceleration)
+void AccelStepper::setAcceleration(float newA)
 {
-    if (acceleration == 0.0)
-	    return;
-    if (acceleration < 0.0)
-        acceleration = -acceleration;
-    
-    if (_acceleration != acceleration)
+    if (newA < 0.0)
+        newA = -newA;
+    if (newA <= 1e-4) {
+        newA = 1e-4;
+    }
+
+    if (_acceleration != newA)
     {
         // Recompute _n per Equation 17
-        _n = _n * (_acceleration / acceleration);
+        _n = _n * (_acceleration / newA);
         // New c0 per Equation 7, with correction per Equation 15
-        _c0 = 0.676 * sqrt(2.0 / acceleration) * 1000000.0; // Equation 15
-        _acceleration = acceleration;
-        //computeNewSpeed();
+        _c0 = 0.676 * sqrt2(2.0 / newA) * LARGE_CN_DIV; // Equation 15
+        _acceleration = newA;
+        
+        // recalculate n using this new accel
+        internalSetSpeed(_targetSpeed); //call computeNewSpeed at last
     }
 }
 
@@ -323,12 +568,13 @@ void AccelStepper::setSpeed(float speed)
     if (speed == _speed)
         return;
     speed = constrain(speed, -_maxSpeed, _maxSpeed);
-    if (speed == 0.0)
-	_stepInterval = 0;
+    float a_sp = fabs(speed);
+    if (a_sp <= _minSpeed)
+	    _stepInterval = 0;
     else
     {
-	_stepInterval = fabs(1000000.0 / speed);
-	_direction = (speed > 0.0) ? DIRECTION_CW : DIRECTION_CCW;
+        _stepInterval = fabs(LARGE_CN_DIV / speed);
+        setDir(speed > 0.0); //speed > 0 is forward
     }
     _speed = speed;
 }
@@ -343,9 +589,9 @@ void AccelStepper::step(long step)
 {
     switch (_interface)
     {
-        case FUNCTION:
-            step0(step);
-            break;
+    case FUNCTION:
+        step0(step);
+        break;
 
 	case DRIVER:
 	    step1(step);
@@ -563,7 +809,7 @@ void AccelStepper::step8(long step)
 }
     
 // Prevents power consumption on the outputs
-void    AccelStepper::disableOutputs()
+void AccelStepper::disableOutputs()
 {   
     if (! _interface) return;
 
@@ -575,7 +821,7 @@ void    AccelStepper::disableOutputs()
     }
 }
 
-void    AccelStepper::enableOutputs()
+void AccelStepper::enableOutputs()
 {
     if (! _interface) 
 	return;
@@ -599,7 +845,7 @@ void    AccelStepper::enableOutputs()
     }
 }
 
-void AccelStepper::setMinPulseWidth(unsigned int minWidth)
+void AccelStepper::setMinPulseWidth(uint16_t minWidth)
 {
     _minPulseWidth = minWidth;
 }
@@ -632,6 +878,14 @@ void AccelStepper::setPinsInverted(bool pin1Invert, bool pin2Invert, bool pin3In
     _enableInverted = enableInvert;
 }
 
+/**
+   setDir(bool)
+   Default is HIGH for forward
+*/
+inline void AccelStepper::setDir(boolean flag) {
+  _direction = flag;
+}
+
 // Blocks until the target position is reached and stopped
 void AccelStepper::runToPosition()
 {
@@ -642,11 +896,11 @@ void AccelStepper::runToPosition()
 boolean AccelStepper::runSpeedToPosition()
 {
     if (_targetPos == _currentPos)
-	return false;
+	    return false;
     if (_targetPos >_currentPos)
-	_direction = DIRECTION_CW;
+        setDir(true);
     else
-	_direction = DIRECTION_CCW;
+        setDir(false);
     return runSpeed();
 }
 
@@ -657,15 +911,21 @@ void AccelStepper::runToNewPosition(long position)
     runToPosition();
 }
 
+//slow down
 void AccelStepper::stop()
 {
-    if (_speed != 0.0)
-    {    
-	long stepsToStop = (long)((_speed * _speed) / (2.0 * _acceleration)) + 1; // Equation 16 (+integer rounding)
-	if (_speed > 0)
-	    move(stepsToStop);
-	else
-	    move(-stepsToStop);
+    if (_curMode == Infinite) {
+        setTargetSpeed(0);
+    }
+    else {
+        if (_speed != 0.0)
+        {    
+            int32_t stepsToStop = (int32_t)((_speed * _speed) / (2.0 * _acceleration)) + 1; // Equation 16 (+integer rounding)
+            if (_speed > 0)
+                move(stepsToStop);
+            else
+                move(-stepsToStop);
+        }
     }
 }
 
