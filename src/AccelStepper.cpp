@@ -27,7 +27,7 @@ float sqrt2(const float x)
   union // get bits for floating value
   {
     float x;
-    int i;
+    int32_t i;
   } u;
   u.x = x;
   u.i = SQRT_MAGIC_F - (u.i >> 1);  // gives initial guess y0
